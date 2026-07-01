@@ -27,8 +27,8 @@ jobs:
 
       - name: Prepare results directory
         run: |
-          mkdir -p "${{ runner.temp }}/results"
-          chmod 777 "${{ runner.temp }}/results"
+          mkdir -p "${{ runner.temp }}/deep-analysis/deep-analysis/WorkFolders"
+          chmod 777 "${{ runner.temp }}/deep-analysis/deep-analysis/WorkFolders"
 
       - name: Run Imaging Cloud Action
         run: |
@@ -36,7 +36,7 @@ jobs:
           set -o pipefail
           docker run \
             -v "$(pwd):/home/carl/extras/source" \
-            -v "${{ runner.temp }}/results:/home/carl/extras/results" \
+            -v "${{ runner.temp }}/deep-analysis/deep-analysis/WorkFolders:/home/carl/extras/results/deep-analysis/deep-analysis/WorkFolders" \
             -e IMAGING_CLOUD_API_KEY=${{ secrets.IMAGING_CLOUD_API_KEY }} \
             -e REPO_URL=${{ github.server_url }}/${{ github.repository }} \
             -e BRANCH_NAME=${{ github.ref_name }} \
@@ -49,15 +49,15 @@ jobs:
       - name: Zip results (debug mode only)
         if: ${{ always() && inputs.debug == true }}
         run: |
-          sudo chown -R "$(id -u):$(id -g)" "${{ runner.temp }}/results" || true
-          cd "${{ runner.temp }}/results"
-          zip -r "${{ runner.temp }}/results.zip" . || true
+          sudo chown -R "$(id -u):$(id -g)" "${{ runner.temp }}/deep-analysis/deep-analysis/WorkFolders" || true
+          cd "${{ runner.temp }}/deep-analysis/deep-analysis/WorkFolders"
+          zip -r "${{ runner.temp }}/deep-analysis/deep-analysis/WorkFolders/LISA.zip" . || true
 
       - name: Upload results artifact (debug mode only)
         if: ${{ always() && inputs.debug == true }}
         uses: actions/upload-artifact@v4
         with:
           name: imaging-results-${{ github.run_id }}
-          path: ${{ runner.temp }}/results.zip
+          path: ${{ runner.temp }}/deep-analysis/deep-analysis/WorkFolders/LISA.zip
           retention-days: 1
           if-no-files-found: warn
