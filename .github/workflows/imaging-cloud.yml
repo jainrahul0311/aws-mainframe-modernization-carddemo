@@ -1,58 +1,174 @@
+# =============================================================================
+#  Imaging Cloud Analyzer - GitHub Action
+# =============================================================================
+#  Runs the CAST Imaging Cloud analyzer on this repository.
+#
+#    * Automatically  -> when a pull request is merged into master / main
+#    * Manually        -> from the "Actions" tab, using the "Run workflow" button
+#
+# -----------------------------------------------------------------------------
+#  DEBUG CAPTURE (optional - manual runs only)
+# -----------------------------------------------------------------------------
+#  When you start the workflow manually with "Debug mode" turned ON, one folder
+#  produced by the analyzer is zipped up and attached to the run as a file you
+#  can download. This is handy for troubleshooting.
+#
+#      >>> The only line you normally change is  CAPTURE_PATH  (see below). <<<
+#
+#  By default it captures the "LISA" folder. To capture something else, just
+#  point CAPTURE_PATH at any folder inside the container (see the env: block in
+#  the job). The downloaded artifact is named after that folder (e.g. "LISA").
+# =============================================================================
+
 name: Imaging Cloud Analyzer Action
-env:
-  version: 1
+
 on:
+  # Run automatically once a PR is merged into these branches.
   pull_request:
-    types:
-      - closed
-    branches:
-      - master
-      - main
+    types: [closed]
+    branches: [master, main]
+
+  # Let anyone start it by hand from the Actions tab, with an optional debug toggle.
   workflow_dispatch:
     inputs:
       debug:
-        description: 'Debug mode: capture results as artifact (success or failure)'
+        description: 'Debug mode: zip the captured folder and attach it to this run'
         type: boolean
         default: false
+
+# Least privilege: this job only reads the repo.
+permissions:
+  contents: read
+
+# Don't let overlapping runs on the same branch pile up.
+concurrency:
+  group: imaging-cloud-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGING_CLOUD_ACTION_FILE_VERSION: '1'
+
 jobs:
   run-imaging-cloud-analyzer:
     if: github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 180   # generous ceiling; a full analysis can take well over an hour on large repos
+
     env:
-      TARGET_DIR: deep-analysis/deep-analysis/WorkFolders/LISA
+      # =======================================================================
+      #  DEBUG CAPTURE  ->  WHICH FOLDER DO YOU WANT TO DOWNLOAD?
+      # =======================================================================
+      #  This is the ONE setting most people change.
+      #
+      #  Set it to the folder you want, written as its absolute path INSIDE THE
+      #  CONTAINER. The whole folder is zipped (the folder itself is included,
+      #  not just its contents), and the downloadable artifact is named after
+      #  it (e.g. "LISA").
+      #
+      #  Default = the analyzer's LISA work folder.
+      #  To grab a different folder, just change this one line.
+      #  (Tip: it can be any folder under the results or source mounts below.)
+      # =======================================================================
+      CAPTURE_PATH: /home/carl/extras/results/deep-analysis/deep-analysis/WorkFolders/LISA
+
+      # ----- Container mount points (only change if the analyzer image changes) -----
+      # Where the analyzer sees the results and source folders, inside the container.
+      CONTAINER_RESULTS_DIR: /home/carl/extras/results
+      CONTAINER_SOURCE_DIR: /home/carl/extras/source
+      # Note: the matching runner-side paths (HOST_RESULTS_DIR, ZIP_FILE) are set in the
+      # "Set up runner paths" step below, because GitHub doesn't allow the runner.* context here.
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set up runner paths
+        run: |
+          # The runner-side paths, derived from this runner's temp directory:
+          #   HOST_RESULTS_DIR -> where the results volume lives on the runner
+          #   ZIP_FILE         -> where the debug .zip is staged before upload
+          # (Done here because the runner.* context isn't allowed in job-level env: above.)
+          echo "HOST_RESULTS_DIR=${RUNNER_TEMP}/results" >> "$GITHUB_ENV"
+          echo "ZIP_FILE=${RUNNER_TEMP}/capture.zip"     >> "$GITHUB_ENV"
+
       - name: Prepare results directory
         run: |
-          mkdir -p "${{ runner.temp }}/results"
-          chmod 777 "${{ runner.temp }}/results"
+          mkdir -p "${HOST_RESULTS_DIR}"
+          chmod 777 "${HOST_RESULTS_DIR}"   # container runs as a different user and must write here
+
       - name: Run Imaging Cloud Action
+        env:
+          IMAGING_CLOUD_API_KEY: ${{ secrets.IMAGING_CLOUD_API_KEY }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          COMMIT_ID: ${{ github.sha }}
+          IMAGING_CLOUD_URL: 'https://dev.castimaging.io'
         run: |
-          cd "${{ github.workspace }}"
           set -o pipefail
-          docker run \
-            -v "$(pwd):/home/carl/extras/source" \
-            -v "${{ runner.temp }}/results:/home/carl/extras/results" \
-            -e IMAGING_CLOUD_API_KEY=${{ secrets.IMAGING_CLOUD_API_KEY }} \
-            -e REPO_URL=${{ github.server_url }}/${{ github.repository }} \
-            -e BRANCH_NAME=${{ github.ref_name }} \
-            -e COMMIT_ID=${{ github.sha }} \
-            -e IMAGING_CLOUD_ACTION_FILE_VERSION=${{ env.version }} \
-            -e IMAGING_CLOUD_URL="https://dev.castimaging.io" \
+          docker run --rm \
+            -v "${{ github.workspace }}:${CONTAINER_SOURCE_DIR}" \
+            -v "${HOST_RESULTS_DIR}:${CONTAINER_RESULTS_DIR}" \
+            -e IMAGING_CLOUD_API_KEY="$IMAGING_CLOUD_API_KEY" \
+            -e REPO_URL="$REPO_URL" \
+            -e BRANCH_NAME="$BRANCH_NAME" \
+            -e COMMIT_ID="$COMMIT_ID" \
+            -e IMAGING_CLOUD_ACTION_FILE_VERSION="$IMAGING_CLOUD_ACTION_FILE_VERSION" \
+            -e IMAGING_CLOUD_URL="$IMAGING_CLOUD_URL" \
             castimaging/imaging-cloud-action:dev \
-            2>&1 | tee "${{ runner.temp }}/results/run.log"
-      - name: Zip results (debug mode only)
-        if: ${{ always() && inputs.debug == true }}
+            2>&1 | tee "${HOST_RESULTS_DIR}/run.log"
+
+      # ---------------------------------------------------------------------
+      #  The two steps below ONLY run on manual runs with "Debug mode" = ON.
+      #  (On automatic PR-merge runs there is no debug toggle, so they skip.)
+      # ---------------------------------------------------------------------
+      - name: Zip the captured folder (debug mode only)
+        if: ${{ always() && inputs.debug }}
         run: |
-          sudo chown -R "$(id -u):$(id -g)" "${{ runner.temp }}/results" || true
-          cd "${{ runner.temp }}/results/$(dirname "${{ env.TARGET_DIR }}")" || exit 0
-          zip -r "${{ runner.temp }}/results.zip" "$(basename "${{ env.TARGET_DIR }}")" || true
-      - name: Upload results artifact (debug mode only)
-        if: ${{ always() && inputs.debug == true }}
+          # The container writes files as a different user; take ownership so we can read them.
+          sudo chown -R "$(id -u):$(id -g)" "${HOST_RESULTS_DIR}" || true
+
+          # CAPTURE_PATH is a path *inside the container*. Translate it to the matching
+          # path on the runner. Only folders under a mounted volume survive the run.
+          case "$CAPTURE_PATH" in
+            "$CONTAINER_RESULTS_DIR"/*)
+              host_path="${HOST_RESULTS_DIR}/${CAPTURE_PATH#"$CONTAINER_RESULTS_DIR"/}" ;;
+            "$CONTAINER_RESULTS_DIR")
+              host_path="${HOST_RESULTS_DIR}" ;;
+            "$CONTAINER_SOURCE_DIR"/*)
+              host_path="${GITHUB_WORKSPACE}/${CAPTURE_PATH#"$CONTAINER_SOURCE_DIR"/}" ;;
+            "$CONTAINER_SOURCE_DIR")
+              host_path="${GITHUB_WORKSPACE}" ;;
+            /*)
+              echo "::warning::CAPTURE_PATH '$CAPTURE_PATH' is not under the results ('$CONTAINER_RESULTS_DIR') or source ('$CONTAINER_SOURCE_DIR') mount, so it is gone once the container exits. Nothing captured."
+              exit 0 ;;
+            *)
+              # Not absolute -> treat it as a path relative to the results folder.
+              host_path="${HOST_RESULTS_DIR}/${CAPTURE_PATH}" ;;
+          esac
+
+          if [ ! -e "$host_path" ]; then
+            echo "::warning::Nothing to capture: '$CAPTURE_PATH' was not found (looked in '$host_path'). Did the analyzer produce it?"
+            exit 0
+          fi
+
+          dir_name="$(basename "$host_path")"
+          # Artifact names can't contain some characters; make the name safe.
+          safe_name="$(printf '%s' "$dir_name" | tr '/\\:*?"<>|' '_' | tr -d '[:cntrl:]')"
+
+          # Zip the folder INCLUSIVELY: the folder itself is the top-level entry in the zip.
+          if ( cd "$(dirname "$host_path")" && zip -r -9 "$ZIP_FILE" "$dir_name" ); then
+            echo "CAPTURE_DIR_NAME=${safe_name}" >> "$GITHUB_ENV"
+            echo "Captured '$host_path' -> $ZIP_FILE  (artifact name: '$safe_name')"
+          else
+            echo "::warning::Failed to zip '$host_path'."
+          fi
+
+      - name: Upload captured folder as artifact (debug mode only)
+        if: ${{ always() && inputs.debug && env.CAPTURE_DIR_NAME != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: imaging-results-${{ github.run_id }}
-          path: ${{ runner.temp }}/results.zip
+          name: ${{ env.CAPTURE_DIR_NAME }}     # artifact is named after the captured folder, e.g. "LISA"
+          path: ${{ env.ZIP_FILE }}
           retention-days: 1
           if-no-files-found: warn
+          compression-level: 0   # already a .zip; skip pointless re-compression
